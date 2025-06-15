@@ -52,14 +52,20 @@ for t in range(time_horizon):
     }
     simulation_history.append(snapshot)
 
-# Build demand table
+# Build demand table and track available customers over time
+customer_ids_by_time = {}
 customer_ids = sorted(dynamic_customers.keys())
 timeline = []
 for snap in simulation_history:
     row = {"time": snap["time"]}
+    appeared_customers = []
     for cid in customer_ids:
-        row[cid] = snap["customers"].get(cid, np.nan)
+        demand = snap["customers"].get(cid, np.nan)
+        row[cid] = demand
+        if not pd.isna(demand):
+            appeared_customers.append(cid)
     timeline.append(row)
+    customer_ids_by_time[snap["time"]] = appeared_customers
 df_timeline = pd.DataFrame(timeline)
 
 customer_demand_over_time = {
@@ -91,11 +97,20 @@ def dp_bellman(t, served_mask, v1_left, v2_left, r1, r2):
     if served_mask == (1 << len(customer_ids)) - 1 or t == time_horizon:
         return 0.0
 
+    # Reset vehicle capacity when the previous route finished and
+    # more vehicles are available at the depot.
+    if r1 == 0 and v1_left > 0:
+        r1 = vehicle_capacity
+    if r2 == 0 and v2_left > 0:
+        r2 = vehicle_capacity
+
     best_cost = float("inf")
     best_decision = []
 
-    unserved = [cid for i, cid in enumerate(customer_ids) if not (served_mask & (1 << i))]
+    current_customers = customer_ids_by_time[t]
     current_demands = customer_demand_over_time[t]
+    unserved = [cid for i, cid in enumerate(customer_ids)
+                if cid in current_customers and not (served_mask & (1 << i))]
 
     for depot_name, depot_coord in depots.items():
         if (depot_name == "P1" and v1_left == 0) or (depot_name == "P2" and v2_left == 0):
@@ -117,10 +132,18 @@ def dp_bellman(t, served_mask, v1_left, v2_left, r1, r2):
                     new_mask |= (1 << idx)
 
                 if depot_name == "P1":
-                    future_cost = dp_bellman(t+1, new_mask, v1_left-1, v2_left, r1-total_demand, r2)
+                    new_v1 = v1_left - 1
+                    new_r1 = r1 - total_demand
+                    if new_r1 == 0 and new_v1 > 0:
+                        new_r1 = vehicle_capacity
+                    future_cost = dp_bellman(t+1, new_mask, new_v1, v2_left, new_r1, r2)
                 else:
-                    future_cost = dp_bellman(t+1, new_mask, v1_left, v2_left-1, r1, r2-total_demand)
-
+                    new_v2 = v2_left - 1
+                    new_r2 = r2 - total_demand
+                    if new_r2 == 0 and new_v2 > 0:
+                        new_r2 = vehicle_capacity
+                    future_cost = dp_bellman(t+1, new_mask, v1_left, new_v2, r1, new_r2)
+                
                 total_cost = latency + discount_factor * future_cost
 
                 if total_cost < best_cost:
@@ -165,9 +188,13 @@ for t in range(time_horizon):
     if route["depot"] == "P1":
         v1_left -= 1
         r1 -= sum(customer_demand_over_time[t].get(cid, 0) for cid in route["route"])
+        if r1 == 0 and v1_left > 0:
+            r1 = vehicle_capacity
     else:
         v2_left -= 1
         r2 -= sum(customer_demand_over_time[t].get(cid, 0) for cid in route["route"])
+        if r2 == 0 and v2_left > 0:
+            r2 = vehicle_capacity
 
 state_evolution_df = pd.DataFrame(state_evolution)
 
@@ -202,9 +229,13 @@ for t in range(time_horizon):
         if route["depot"] == "P1":
             v1_left -= 1
             r1 -= total_demand
+            if r1 == 0 and v1_left > 0:
+                r1 = vehicle_capacity
         elif route["depot"] == "P2":
             v2_left -= 1
             r2 -= total_demand
+            if r2 == 0 and v2_left > 0:
+                r2 = vehicle_capacity
 
 solution_steps_df = pd.DataFrame(solution_steps)
 
