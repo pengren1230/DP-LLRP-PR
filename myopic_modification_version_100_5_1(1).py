@@ -520,6 +520,103 @@ def nearest_k(avail, d_idx, K=K_NEAR):
     return sorted(avail, key=lambda cid: W[d_idx, name_to_cidx[cid]])[:K]
 
 def cw_candidates(nearest_list, d_idx, cap, inv, t, limit=CAND_LIMIT):
+    routes = [[c] for c in nearest_list if 0 < demand_table[t][c] <= min(cap, inv)]
+    # pairwise savings
+    sav = []
+    for i in range(len(nearest_list)):
+        for j in range(i + 1, len(nearest_list)):
+            ci, cj = nearest_list[i], nearest_list[j]
+            ni, nj = name_to_cidx[ci], name_to_cidx[cj]
+            sav.append((W[d_idx, ni] + W[d_idx, nj] - W[ni, nj], ci, cj))
+    sav.sort(reverse=True)
+
+    cand = []
+    def fits(route):
+        dem = sum(demand_table[t][c] for c in route)
+        return (dem > 0) and (dem <= cap) and (dem <= inv)
+
+    for s, ci, cj in sav:
+        ri = next((r for r in routes if r[0] == ci or r[-1] == ci), None)
+        rj = next((r for r in routes if r[0] == cj or r[-1] == cj), None)
+        if not ri or not rj or ri is rj:
+            continue
+        merged = None
+        for v in (ri + rj, list(reversed(ri)) + rj,
+                  ri + list(reversed(rj)), list(reversed(ri)) + list(reversed(rj))):
+            if fits(v):
+                merged = v; break
+        if merged:
+            routes.remove(ri); routes.remove(rj); routes.append(merged)
+            cand.append(merged)
+            if len(cand) >= limit:
+                break
+
+    extras = []
+    for r in routes:
+        Lmax = min(len(r), MAX_ROUTE_SIZE)
+        for L in range(1, Lmax + 1):
+            seg = r[:L]
+            if fits(seg):
+                extras.append(seg)
+
+    seen, uniq = set(), []
+    for s in cand + extras:
+        key = frozenset(s)
+        if key not in seen:
+            seen.add(key); uniq.append(s)
+        if len(uniq) >= limit:
+            break
+    return uniq
+
+# -----------------------------
+# Tail value estimator (non-myopic lookahead)
+# -----------------------------
+def estimate_tail_value(remaining, inv_left, r_left, v_left, t_start_next, per_depot_iters=2):
+    """Greedy proxy for undiscounted cost-to-go to complete remaining set."""
+    rem = list(remaining)
+    est = 0.0
+    if not rem:
+        return 0.0
+    r_tmp = dict(r_left)
+    v_tmp = dict(v_left)
+    inv_tmp = dict(inv_left)
+
+    for dname in depot_names:
+        iters = per_depot_iters
+        while iters > 0:
+            if r_tmp[dname] <= 0 and v_tmp[dname] > 0:
+                v_tmp[dname] -= 1
+                r_tmp[dname] = vehicle_capacity
+            cap = r_tmp[dname] if r_tmp[dname] > 0 else (vehicle_capacity if v_tmp[dname] > 0 else 0)
+            inv = inv_tmp[dname]
+            if cap <= 0 or inv <= 0:
+                break
+            d_idx = depot_names.index(dname)
+            pool  = nearest_k(rem, d_idx, K_NEAR)
+            t_eff = min(t_start_next, time_horizon - 1)
+            cands = cw_candidates(pool, d_idx, cap, inv, t_eff, CAND_LIMIT)
+            best_local = None  # (lat, subset_names, dem)
+            for subset_names in cands:
+                dem = sum(demand_table[t_eff][c] for c in subset_names)
+                if dem <= 0 or dem > cap or dem > inv:
+                    continue
+                subset_idx = [name_to_cidx[c] for c in subset_names]
+                lat = latency_fast(d_idx, subset_idx)
+                cand = (lat, subset_names, dem)
+                if best_local is None or lat < best_local[0] or (lat == best_local[0] and dem > best_local[2]):
+                    best_local = cand
+            if best_local is None:
+                nearest, bestd = None, float('inf')
+                for cid in rem:
+                    q = demand_table[t_eff][cid]
+                    if q <= 0 or q > cap or q > inv:
+                        continue
+                    cidx = name_to_cidx[cid]
+                    d = W[d_idx, cidx]
+                    if d < bestd:
+                        bestd, nearest = d, cid
+                if nearest is None:
+                    break
 
                 subset_names = [nearest]
                 subset_idx = [name_to_cidx[nearest]]
